@@ -1,18 +1,81 @@
 use std::error::Error;
 use winapi::shared::windef::HWND;
 use std::ffi::{CStr, CString};
+use std::path::Path;
+use std::fmt::{Debug, Formatter, Display};
+mod wv2;
 
-pub type WVResult<T=()> = Result<T,Box<dyn Error>>;
+#[derive(Debug,Di)]
+pub enum WVError {
+    Cause(&'static str)
+}
+
+impl Display for WVError {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}",self)
+    }
+}
+
+impl std::error::Error for WVError { }
+
+pub fn install_webview2(confirm:Option<&str>, wv2_folder:Option<&Path>) -> bool {
+    if webview2::get_available_browser_version_string(wv2_folder).is_err() {
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+
+        if let Some(m) = confirm {
+            use tinyfiledialogs::*;
+            if let OkCancel::Cancel = message_box_ok_cancel("", m, MessageBoxIcon::Question, OkCancel::Ok) {
+                return false
+            }
+        }
+
+        // Run a powershell script to install the WebView2 runtime.
+        //
+        // Use powershell instead of a rust http library like ureq because using
+        // the latter makes the executable file a lot bigger (~500KiB).
+        let mut p = std::process::Command::new("powershell.exe")
+            .arg("-Command")
+            .arg("-")
+            // Let powershell open its own console window.
+            .creation_flags(/*CREATE_NEW_CONSOLE*/ 0x00000010)
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut stdin = p.stdin.take().unwrap();
+        stdin
+            .write_all(include_bytes!("download-and-run-bootstrapper.ps1"))
+            .unwrap();
+        drop(stdin);
+        let r = p.wait().unwrap();
+        r.success()
+    } else {
+        true
+    }
+}
+
+pub type WVResult<T=()> = Result<T,WVError>;
 
 #[derive(Copy,Clone)]
 pub enum WebViewEngine {
-    Auto,
+    ///Suggestion webview2
+    /// ex:)
+    /// Auto(Some("WebView2 is not installed. WebView2 will provide a better experience. WebView2 will provide a better experience.")) => Suggestion install webview2. if installation failed then fallback to legaycy mode
+    /// Auto(None) => Not suggestion installing webview2 but try install. if installation failed then fallback to legaycy mode
+    Auto(Option<&'static str>),
+
+    ///if webview2 not available then we use legacy MSHTML
+    Fallback,
+
+    ///Force legacy MSHTML
     Legacy,
-    WebView2
+
+    ///Force webview2
+    WebView2(Option<&'static str>)
 }
 
 pub struct WebViewLegacyHolder<'a> {
-    title : CString
+    title : &'a str
 }
 
 pub struct WebView2Holder<'a> {
@@ -55,7 +118,7 @@ pub struct WebViewBuilder<'a> {
 impl Default for WebViewBuilder {
     fn default() -> Self {
         WebViewBuilder {
-            engine : WebViewEngine::Auto,
+            engine : WebViewEngine::Auto(Some("")),
             holder : WebViewInfoHolder::default(),
             url : "about:blank",
             debug : false,
@@ -131,53 +194,65 @@ impl WebViewBuilder {
 
     /// Validates provided arguments and returns a new WebView if successful.
     pub fn build(self) -> WVResult<WebView> {
-        let wv2 = match self.engine {
-            WebViewEngine::WebView2 | WebViewEngine::Auto => {
-                if webview2::get_available_browser_version_string(None).is_err() {
-                    use std::io::Write;
-                    use std::os::windows::process::CommandExt;
-
-                    // Run a powershell script to install the WebView2 runtime.
-                    //
-                    // Use powershell instead of a rust http library like ureq because using
-                    // the latter makes the executable file a lot bigger (~500KiB).
-                    let mut p = std::process::Command::new("powershell.exe")
-                        .arg("-Command")
-                        .arg("-")
-                        // Let powershell open its own console window.
-                        .creation_flags(/*CREATE_NEW_CONSOLE*/ 0x00000010)
-                        .stdin(std::process::Stdio::piped())
-                        .spawn()
-                        .unwrap();
-                    let mut stdin = p.stdin.take().unwrap();
-                    stdin
-                        .write_all(include_bytes!("download-and-run-bootstrapper.ps1"))
-                        .unwrap();
-                    drop(stdin);
-                    let r = p.wait().unwrap();
-                    if !r.success() {
-                        None;
-                    }
+        let wv2_installed = match self.engine {
+            WebViewEngine::WebView2(msg) => {
+                if !install_webview2(msg, None) {
+                    return Err(WVRe)
                 }
+                true
+            }
+            WebViewEngine::Auto(msg) => {
+                install_webview2(msg, None)
+            }
+            WebViewEngine::Fallback => {
+                webview2::get_available_browser_version_string(wv2_folder).is_ok()
             }
             _ => None
         };
 
+        if wv2_installed {
+            //we can use webview2
+            use once_cell::unsync::OnceCell;
+            use std::mem;
+            use std::ptr;
+            use std::rc::Rc;
+            use webview2::Controller;
+            use winapi::{
+                shared::minwindef::*, shared::windef::*, um::libloaderapi::*, um::winbase::MulDiv,
+                um::wingdi::*, um::winuser::*,
+            };
+            fn utf_16_null_terminiated(x: &str) -> Vec<u16> {
+                x.encode_utf16().chain(std::iter::once(0)).collect()
+            }
+            fn message_box(hwnd: HWND, text: &str, caption: &str, _type: u32) -> i32 {
+                let text = utf_16_null_terminiated(text);
+                let caption = utf_16_null_terminiated(caption);
+
+                unsafe { MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), _type) }
+            }
+
+
+        }
+
         if let Some(wv2) = wv2 {
-            CStr::
+            Err( std::io::Error )
         } else if wv2.is_none() &&
             (self.engine == WebViewEngine::Auto || self.engine == WebViewEngine::Legacy) {
-            let wv_legacy = web_view::WebView::new(
-                self.title,
-                &url,
-                self.width,
-                self.height,
-                self.resizable,
-                self.debug,
-                self.frameless,
-                user_data,
-                invoke_handler,
-            );
+            let url = if &self.url[ .. 10.min(self.url.len()-1)].find("://").is_none() {
+                web_view::Content::Html( self.url )
+            } else {
+                web_view::Content::Url( self.url )
+            };
+            let wv_legacy = web_view::WebViewBuilder::new()
+                .title( self.title )
+                .content( url )
+                .size( self.width, self.height )
+                .resizable( self.resizable )
+                .debug( self.debug )
+                .frameless( self.frameless )
+                .user_data( () )
+                .invoke_handler( |_,_| { Ok(())} )
+                .build()?;
             Ok( WebView::WV1( (self.holder.clone(),wv_legacy) ) )
         } else {
             Ok( wv2? )
