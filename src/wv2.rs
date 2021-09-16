@@ -8,6 +8,7 @@ use winapi::{
     shared::minwindef::*, shared::windef::*, um::libloaderapi::*, um::winbase::MulDiv,
     um::wingdi::*, um::winuser::*,
 };
+use crate::{WVResult, WVError};
 
 fn utf_16_null_terminiated(x: &str) -> Vec<u16> {
     x.encode_utf16().chain(std::iter::once(0)).collect()
@@ -19,12 +20,149 @@ fn message_box(hwnd: HWND, text: &str, caption: &str, _type: u32) -> i32 {
     unsafe { MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), _type) }
 }
 
-pub struct WebView2 {
-
+pub struct WebView2Builder<'a> {
+    pub title : &'a str,
+    pub url : &'a str,
+    pub debug : bool,
+    pub width: i32,
+    pub height: i32,
+    pub resizable: bool,
+    pub invoke_handler: Option<fn (&mut WebView2, data:&str)>,
+    pub frameless: bool,
 }
 
-impl WebView2 {
-    pub fn new() {
+impl <'a> Default for WebView2Builder<'_> {
+    fn default() -> Self {
+        WebView2Builder {
+            title : "No title",
+            url : "about:blank",
+            debug : false,
+            width: 800,
+            height: 600,
+            resizable: true,
+            invoke_handler: None,
+            frameless: false,
+        }
+    }
+}
+
+mod wnd_proc_helper {
+    use super::*;
+    use std::cell::UnsafeCell;
+
+    struct UnsafeSyncCell<T> {
+        inner: UnsafeCell<T>,
+    }
+
+    impl<T> UnsafeSyncCell<T> {
+        const fn new(t: T) -> UnsafeSyncCell<T> {
+            UnsafeSyncCell {
+                inner: UnsafeCell::new(t),
+            }
+        }
+    }
+
+    impl<T: Copy> UnsafeSyncCell<T> {
+        unsafe fn get(&self) -> T {
+            self.inner.get().read()
+        }
+
+        unsafe fn set(&self, v: T) {
+            self.inner.get().write(v)
+        }
+    }
+
+    unsafe impl<T: Copy> Sync for UnsafeSyncCell<T> {}
+
+    static GLOBAL_F: UnsafeSyncCell<usize> = UnsafeSyncCell::new(0);
+
+    /// Use a closure as window procedure.
+    ///
+    /// The closure will be boxed and stored in a global variable. It will be
+    /// released upon WM_DESTROY. (It doesn't get to handle WM_DESTROY.)
+    pub unsafe fn as_global_wnd_proc<F: Fn(HWND, UINT, WPARAM, LPARAM) -> isize + 'static>(
+        f: F,
+    ) -> unsafe extern "system" fn(hwnd: HWND, msg: UINT, w_param: WPARAM, l_param: LPARAM) -> isize
+    {
+        let f_ptr = Box::into_raw(Box::new(f));
+        GLOBAL_F.set(f_ptr as usize);
+
+        unsafe extern "system" fn wnd_proc<F: Fn(HWND, UINT, WPARAM, LPARAM) -> isize + 'static>(
+            hwnd: HWND,
+            msg: UINT,
+            w_param: WPARAM,
+            l_param: LPARAM,
+        ) -> isize {
+            let f_ptr = GLOBAL_F.get() as *mut F;
+
+            if msg == WM_DESTROY {
+                Box::from_raw(f_ptr);
+                GLOBAL_F.set(0);
+                PostQuitMessage(0);
+                return 0;
+            }
+
+            if !f_ptr.is_null() {
+                let f = &*f_ptr;
+
+                f(hwnd, msg, w_param, l_param)
+            } else {
+                DefWindowProcW(hwnd, msg, w_param, l_param)
+            }
+        }
+
+        wnd_proc::<F>
+    }
+}
+
+impl <'a> WebView2Builder<'a> {
+    /// Alias for [`WebViewBuilder::default()`].
+    ///
+    /// [`WebViewBuilder::default()`]: struct.WebviewBuilder.html#impl-Default
+    pub fn new() -> Self {
+        WebView2Builder::default()
+    }
+
+    /// Sets the title of the WebView window.
+    ///
+    /// Defaults to `"Application"`.
+    pub fn title(mut self, title: &'a str) -> Self {
+        self.title = title;
+        self
+    }
+
+    /// Sets the size of the WebView window.
+    ///
+    /// Defaults to 800 x 600.
+    pub fn size(mut self, width: i32, height: i32) -> Self {
+        self.width = width;
+        self.height = height;
+        self
+    }
+
+    pub fn url(mut self, url:&'a str) -> Self {
+        self.url = url;
+        self
+    }
+
+    /// Sets the resizability of the WebView window. If set to false, the window cannot be resized.
+    ///
+    /// Defaults to `true`.
+    pub fn resizable(mut self, resizable: bool) -> Self {
+        self.resizable = resizable;
+        self
+    }
+
+    /// The window crated will be frameless
+    ///
+    /// defaults to `false`
+    pub fn frameless(mut self, frameless: bool) -> Self {
+        self.frameless = frameless;
+        self
+    }
+
+    /// Validates provided arguments and returns a new WebView if successful.
+    pub fn build(self) -> WVResult<WebView2> {
         //set dpi aware
         unsafe {
             // Windows 10.
@@ -47,6 +185,7 @@ impl WebView2 {
 
         let controller = Rc::new(OnceCell::<Controller>::new());
         let controller_clone = controller.clone();
+        let controller_holder = controller.clone();
 
         // Window procedure.
         let wnd_proc = move |hwnd, msg, w_param, l_param| match msg {
@@ -133,8 +272,8 @@ impl WebView2 {
                 WS_OVERLAPPEDWINDOW,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                MulDiv(width, dpi, USER_DEFAULT_SCREEN_DPI),
-                MulDiv(height, dpi, USER_DEFAULT_SCREEN_DPI),
+                MulDiv(self.width, dpi, USER_DEFAULT_SCREEN_DPI),
+                MulDiv(self.height, dpi, USER_DEFAULT_SCREEN_DPI),
                 ptr::null_mut(),
                 ptr::null_mut(),
                 h_instance,
@@ -208,5 +347,41 @@ window.chrome.webview.addEventListener('message', event => alert('Received messa
             );
             return Err(WVError::Cause("Creating WebView2 Environment failed"));
         }
+
+        Ok( WebView2 {
+            hwnd : hwnd,
+            wv: controller_holder
+        } )
+
+    }
+}
+
+pub struct WebView2 {
+    hwnd : HWND,
+    wv : Rc<OnceCell<Controller>>
+}
+
+impl Drop for WebView2 {
+    fn drop(&mut self) {
+        self.exit();
+    }
+}
+
+
+impl WebView2 {
+    pub fn step(&mut self) {
+
+    }
+
+    pub fn exit(&mut self) {
+        unsafe {
+            DestroyWindow(self.hwnd);
+            self.hwnd = 0 as _;
+        }
+    }
+
+    pub fn loadUrl(&mut self, url:&str) {
+        //self.wv.navigate(url);
+        self.wv.get().unwrap().get_webview().unwrap().navigate(url);
     }
 }

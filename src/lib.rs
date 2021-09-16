@@ -5,7 +5,7 @@ use std::path::Path;
 use std::fmt::{Debug, Formatter, Display};
 mod wv2;
 
-#[derive(Debug,Di)]
+#[derive(Debug)]
 pub enum WVError {
     Cause(&'static str)
 }
@@ -17,6 +17,12 @@ impl Display for WVError {
 }
 
 impl std::error::Error for WVError { }
+
+impl From<web_view::Error> for WVError {
+    fn from(_: web_view::Error) -> Self {
+        Self::Cause("wv1 error")
+    }
+}
 
 pub fn install_webview2(confirm:Option<&str>, wv2_folder:Option<&Path>) -> bool {
     if webview2::get_available_browser_version_string(wv2_folder).is_err() {
@@ -44,7 +50,7 @@ pub fn install_webview2(confirm:Option<&str>, wv2_folder:Option<&Path>) -> bool 
             .unwrap();
         let mut stdin = p.stdin.take().unwrap();
         stdin
-            .write_all(include_bytes!("download-and-run-bootstrapper.ps1"))
+            .write_all(include_bytes!("../download-and-run-bootstrapper.ps1"))
             .unwrap();
         drop(stdin);
         let r = p.wait().unwrap();
@@ -57,10 +63,10 @@ pub fn install_webview2(confirm:Option<&str>, wv2_folder:Option<&Path>) -> bool 
 pub type WVResult<T=()> = Result<T,WVError>;
 
 #[derive(Copy,Clone)]
-pub enum WebViewEngine {
+pub enum WebViewMode {
     ///Suggestion webview2
     /// ex:)
-    /// Auto(Some("WebView2 is not installed. WebView2 will provide a better experience. WebView2 will provide a better experience.")) => Suggestion install webview2. if installation failed then fallback to legaycy mode
+    /// Auto(Some("WebView2 is not installed. WebView2 will provide a better experience. Do you want install?")) => Suggestion install webview2. if installation failed then fallback to legaycy mode
     /// Auto(None) => Not suggestion installing webview2 but try install. if installation failed then fallback to legaycy mode
     Auto(Option<&'static str>),
 
@@ -68,44 +74,15 @@ pub enum WebViewEngine {
     Fallback,
 
     ///Force legacy MSHTML
-    Legacy,
+    MSHTML,
 
     ///Force webview2
     WebView2(Option<&'static str>)
 }
 
-pub struct WebViewLegacyHolder<'a> {
-    title : &'a str
-}
-
-pub struct WebView2Holder<'a> {
-    title : &'a str,
-    hwnd : HWND
-}
-
-pub enum WebViewInfoHolder<'a> {
-    Legacy(WebViewLegacyHolder<'a>),
-    WebView2(WebView2Holder<'a>)
-}
-
-impl <'a> WebViewInfoHolder<'_> {
-    pub fn set_title(&mut self, t:&'a str) {
-        match self {
-            WebViewInfoHolder::Legacy(v) => { v.title = t; }
-            WebViewInfoHolder::WebView2(v) => { v.title = t; }
-        }
-    }
-}
-
-impl Default for WebViewInfoHolder {
-    fn default() -> Self {
-        Self { title : "No title" }
-    }
-}
-
 pub struct WebViewBuilder<'a> {
-    pub engine : WebViewEngine,
-    pub holder: WebViewInfoHolder<'a>,
+    pub engine : WebViewMode,
+    pub title : &'a str,
     pub url : &'a str,
     pub debug : bool,
     pub width: i32,
@@ -115,11 +92,11 @@ pub struct WebViewBuilder<'a> {
     pub frameless: bool,
 }
 
-impl Default for WebViewBuilder {
+impl <'a> Default for WebViewBuilder<'_> {
     fn default() -> Self {
         WebViewBuilder {
-            engine : WebViewEngine::Auto(Some("")),
-            holder : WebViewInfoHolder::default(),
+            engine : WebViewMode::Auto(Some("")),
+            title : "No title",
             url : "about:blank",
             debug : false,
             width: 800,
@@ -131,7 +108,7 @@ impl Default for WebViewBuilder {
     }
 }
 
-impl WebViewBuilder {
+impl <'a> WebViewBuilder<'a> {
     /// Alias for [`WebViewBuilder::default()`].
     ///
     /// [`WebViewBuilder::default()`]: struct.WebviewBuilder.html#impl-Default
@@ -139,11 +116,16 @@ impl WebViewBuilder {
         WebViewBuilder::default()
     }
 
+    pub fn mode(mut self, mode:WebViewMode) -> Self {
+        self.engine = mode;
+        self
+    }
+
     /// Sets the title of the WebView window.
     ///
     /// Defaults to `"Application"`.
-    pub fn title(mut self, title: & str) -> Self {
-        self.holder.set_title( title );
+    pub fn title(mut self, title: &'a str) -> Self {
+        self.title = title;
         self
     }
 
@@ -153,6 +135,11 @@ impl WebViewBuilder {
     pub fn size(mut self, width: i32, height: i32) -> Self {
         self.width = width;
         self.height = height;
+        self
+    }
+
+    pub fn url(mut self, url:&'a str) -> Self {
+        self.url = url;
         self
     }
 
@@ -180,34 +167,27 @@ impl WebViewBuilder {
     /// If the closure returns an `Err`, it will be returned on the next call to [`step()`].
     ///
     /// [`step()`]: struct.WebView.html#method.step
-    pub fn invoke_handler(mut self, invoke_handler: I) -> Self {
+    pub fn invoke_handler(mut self, invoke_handler: fn(&mut WebView, data:&str)) -> Self {
         self.invoke_handler = Some(invoke_handler);
         self
     }
 
-    /// Sets the initial state of the user data. This is an arbitrary value stored on the WebView
-    /// thread, accessible from dispatched closures without synchronization overhead.
-    pub fn user_data(mut self, user_data: T) -> Self {
-        self.user_data = Some(user_data);
-        self
-    }
-
     /// Validates provided arguments and returns a new WebView if successful.
-    pub fn build(self) -> WVResult<WebView> {
+    pub fn build(self) -> WVResult<WebView<'a>> {
         let wv2_installed = match self.engine {
-            WebViewEngine::WebView2(msg) => {
+            WebViewMode::WebView2(msg) => {
                 if !install_webview2(msg, None) {
-                    return Err(WVRe)
+                    return Err(WVError::Cause("webview2 install failed"))
                 }
                 true
             }
-            WebViewEngine::Auto(msg) => {
+            WebViewMode::Auto(msg) => {
                 install_webview2(msg, None)
             }
-            WebViewEngine::Fallback => {
-                webview2::get_available_browser_version_string(wv2_folder).is_ok()
+            WebViewMode::Fallback => {
+                webview2::get_available_browser_version_string(None).is_ok()
             }
-            _ => None
+            _ => false
         };
 
         if wv2_installed {
@@ -231,57 +211,63 @@ impl WebViewBuilder {
                 unsafe { MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), _type) }
             }
 
-
-        }
-
-        if let Some(wv2) = wv2 {
-            Err( std::io::Error )
-        } else if wv2.is_none() &&
-            (self.engine == WebViewEngine::Auto || self.engine == WebViewEngine::Legacy) {
-            let url = if &self.url[ .. 10.min(self.url.len()-1)].find("://").is_none() {
-                web_view::Content::Html( self.url )
-            } else {
-                web_view::Content::Url( self.url )
-            };
-            let wv_legacy = web_view::WebViewBuilder::new()
+            let wv2 = wv2::WebView2Builder::new()
                 .title( self.title )
-                .content( url )
+                .url( self.url )
                 .size( self.width, self.height )
                 .resizable( self.resizable )
-                .debug( self.debug )
-                .frameless( self.frameless )
-                .user_data( () )
-                .invoke_handler( |_,_| { Ok(())} )
                 .build()?;
-            Ok( WebView::WV1( (self.holder.clone(),wv_legacy) ) )
-        } else {
-            Ok( wv2? )
+
+            return Ok(
+                WebView::WV2(wv2)
+            )
         }
 
-    }
+        let url = if self.url[ .. 10.min(self.url.len()-1)].find("://").is_none() {
+            web_view::Content::Html( self.url )
+        } else {
+            web_view::Content::Url( self.url )
+        };
+        let wv_legacy = web_view::WebViewBuilder::new()
+            .title( self.title )
+            .content( url )
+            .size( self.width, self.height )
+            .resizable( self.resizable )
+            .debug( self.debug )
+            .frameless( self.frameless )
+            .user_data( () )
+            .invoke_handler( |_,_| { Ok(())} )
+            .build()?;
+        Ok( WebView::WV1( wv_legacy ) )
 
-    /// Validates provided arguments and runs a new WebView to completion, returning the user data.
-    ///
-    /// Equivalent to `build()?.run()`.
-    pub fn run(self) {
-        self.build()?.run()
     }
 }
 
 
-enum WebView<'a> {
-    WV1( (WebViewLegacyHolder<'a>, web_view::WebView<'a, ()>) ),
-    WV2( (WebView2Holder<'a>, webview2::WebView) )
+pub enum WebView<'a> {
+    WV1( web_view::WebView<'a, ()> ),
+    WV2( wv2::WebView2 )
 }
 
 impl <'a> WebView<'a> {
     pub fn step(&mut self) {
         match self {
-            WebView::WV1( (_,wv)) => {
+            WebView::WV1( wv) => {
                 wv.step();
             }
-            WebView::WV2( (h,wv) ) => {
+            WebView::WV2( wv) => {
+                wv.step();
+            }
+        }
+    }
 
+    pub fn exit(&mut self) {
+        match self {
+            WebView::WV1( wv) => {
+                wv.exit();
+            }
+            WebView::WV2( wv) => {
+                wv.exit();
             }
         }
     }
