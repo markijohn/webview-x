@@ -20,9 +20,10 @@ fn message_box(hwnd: HWND, text: &str, caption: &str, _type: u32) -> i32 {
     unsafe { MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), _type) }
 }
 
-pub struct WebView2Builder<'a> {
-    pub title : &'a str,
-    pub url : &'a str,
+pub struct WebView2Builder {
+    pub background_color : (u8,u8,u8,u8),
+    pub title : String,
+    pub url : String,
     pub debug : bool,
     pub width: i32,
     pub height: i32,
@@ -31,11 +32,29 @@ pub struct WebView2Builder<'a> {
     pub frameless: bool,
 }
 
-impl <'a> Default for WebView2Builder<'_> {
+impl Default for WebView2Builder {
     fn default() -> Self {
         WebView2Builder {
-            title : "No title",
-            url : "about:blank",
+            background_color : (0xff,0xff,0xff,0xff),
+            title : "No title".to_owned(),
+            url : r##"
+<!doctype html>
+<title>Demo</title>
+<form action="javascript:void(0);">
+    <label for="message-input">Message: </label
+    ><input id="message-input" type="text"
+    ><button type="submit">Send</button>
+</form>
+<script>
+const inputElement = document.getElementById('message-input');
+document.getElementsByTagName('form')[0].addEventListener('submit', e => {
+    // Send message to host.
+    window.chrome.webview.postMessage(inputElement.value);
+});
+// Receive from host.
+window.chrome.webview.addEventListener('message', event => alert('Received message: ' + event.data));
+</script>
+"##.to_owned(),
             debug : false,
             width: 800,
             height: 600,
@@ -115,7 +134,7 @@ mod wnd_proc_helper {
     }
 }
 
-impl <'a> WebView2Builder<'a> {
+impl WebView2Builder {
     /// Alias for [`WebViewBuilder::default()`].
     ///
     /// [`WebViewBuilder::default()`]: struct.WebviewBuilder.html#impl-Default
@@ -126,8 +145,8 @@ impl <'a> WebView2Builder<'a> {
     /// Sets the title of the WebView window.
     ///
     /// Defaults to `"Application"`.
-    pub fn title(mut self, title: &'a str) -> Self {
-        self.title = title;
+    pub fn title(mut self, title: & str) -> Self {
+        self.title = title.to_owned();
         self
     }
 
@@ -140,8 +159,8 @@ impl <'a> WebView2Builder<'a> {
         self
     }
 
-    pub fn url(mut self, url:&'a str) -> Self {
-        self.url = url;
+    pub fn url(mut self, url:& str) -> Self {
+        self.url = url.to_owned();
         self
     }
 
@@ -301,33 +320,28 @@ impl <'a> WebView2Builder<'a> {
         let r = webview2::Environment::builder().build(move |env| {
             env.unwrap().create_controller(hwnd, move |c| {
                 let c = c.unwrap();
+                // if let Ok(c2) = c.get_controller2() {
+                //     let c = self.background_color;
+                //     c2.put_default_background_color(webview2_sys::Color {
+                //         r: c.0,
+                //         g: c.1,
+                //         b: c.2,
+                //         a: c.3,
+                //     }).unwrap();
+                // } else {
+                //     eprintln!("failed to get interface to controller2");
+                // }
 
                 let mut r = unsafe { mem::zeroed() };
                 unsafe {
                     GetClientRect(hwnd, &mut r);
                 }
+
                 c.put_bounds(r).unwrap();
 
                 let w = c.get_webview().unwrap();
                 // Communication.
-                w.navigate_to_string(r##"
-<!doctype html>
-<title>Demo</title>
-<form action="javascript:void(0);">
-    <label for="message-input">Message: </label
-    ><input id="message-input" type="text"
-    ><button type="submit">Send</button>
-</form>
-<script>
-const inputElement = document.getElementById('message-input');
-document.getElementsByTagName('form')[0].addEventListener('submit', e => {
-    // Send message to host.
-    window.chrome.webview.postMessage(inputElement.value);
-});
-// Receive from host.
-window.chrome.webview.addEventListener('message', event => alert('Received message: ' + event.data));
-</script>
-"##).unwrap();
+                w.navigate_to_string(self.url.as_str() ).unwrap();
                 // Receive message from webpage.
                 w.add_web_message_received(|w, msg| {
                     let msg = msg.try_get_web_message_as_string()?;

@@ -82,6 +82,7 @@ pub enum WebViewMode {
 
 pub struct WebViewBuilder<'a> {
     pub engine : WebViewMode,
+    pub background_color : (u8,u8,u8,u8),
     pub title : &'a str,
     pub url : &'a str,
     pub debug : bool,
@@ -96,6 +97,7 @@ impl <'a> Default for WebViewBuilder<'_> {
     fn default() -> Self {
         WebViewBuilder {
             engine : WebViewMode::Auto(Some("")),
+            background_color : (255,255,255,255),
             title : "No title",
             url : "about:blank",
             debug : false,
@@ -119,6 +121,10 @@ impl <'a> WebViewBuilder<'a> {
     pub fn mode(mut self, mode:WebViewMode) -> Self {
         self.engine = mode;
         self
+    }
+
+    pub fn background_color(mut self, r:u8, g:u8, b:u8, a:u8) {
+        self.background_color = (r,g,b,a);
     }
 
     /// Sets the title of the WebView window.
@@ -228,7 +234,7 @@ impl <'a> WebViewBuilder<'a> {
         } else {
             web_view::Content::Url( self.url )
         };
-        let wv_legacy = web_view::WebViewBuilder::new()
+        let mut wv_legacy = web_view::WebViewBuilder::new()
             .title( self.title )
             .content( url )
             .size( self.width, self.height )
@@ -238,6 +244,7 @@ impl <'a> WebViewBuilder<'a> {
             .user_data( () )
             .invoke_handler( |_,_| { Ok(())} )
             .build()?;
+        wv_legacy.set_color( self.background_color );
         Ok( WebView::WV1( wv_legacy ) )
 
     }
